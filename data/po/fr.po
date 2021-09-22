@@ -6359,7 +6359,7 @@ msgstr "Pour déraper, accélère et appuie sur l'icône de dérapage tout en to
 msgid ""
 "Note that if you manage to skid for several seconds, you will receive a "
 "bonus speedup as a reward!"
-msgstr "Remarque que si tu arrives à déraper pendant plusieurs secondes, tu recevras un bonus de vitesse en récompense !"
+msgstr "Si tu arrives à déraper pendant plusieurs secondes, tu recevras un bonus de vitesse en récompense !"
 
 #: ../stk-assets/tracks/tutorial/scripting.as:164
 msgid "You are now ready to race. Good luck!"
