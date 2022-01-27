@@ -39,10 +39,10 @@
 #include "guiengine/widgets/label_widget.hpp"
 #include "guiengine/widgets/ribbon_widget.hpp"
 #include "io/file_manager.hpp"
-#include "karts/abstract_kart.hpp"
 #include "karts/controller/controller.hpp"
 #include "karts/controller/end_controller.hpp"
 #include "karts/controller/local_player_controller.hpp"
+#include "karts/ghost_kart.hpp"
 #include "karts/kart_properties.hpp"
 #include "karts/kart_properties_manager.hpp"
 #include "modes/cutscene_world.hpp"
@@ -207,14 +207,20 @@ void RaceResultGUI::init()
     
     if (RaceManager::get()->getMajorMode() == RaceManager::MAJOR_MODE_GRAND_PRIX &&
         !NetworkConfig::get()->isNetworking() &&
-        (RaceManager::get()->getMinorMode() == RaceManager::MINOR_MODE_NORMAL_RACE || RaceManager::get()->getMinorMode() == RaceManager::MINOR_MODE_TIME_TRIAL))
+        (RaceManager::get()->getMinorMode() == RaceManager::MINOR_MODE_NORMAL_RACE || RaceManager::get()->getMinorMode() == RaceManager::MINOR_MODE_TIME_TRIAL ||
+        RaceManager::get()->isLapTrialMode()))
     {
+        const AbstractKart* k = RaceManager::get()->getKartWithGPRank(RaceManager::get()->getLocalPlayerGPRank(PLAYER_ID_GAME_MASTER));
+        RaceManager::get()->addGPTotalLaps(World::getWorld()->getFinishedLapsOfKart(k->getWorldKartId()));
         if (RaceManager::get()->getNumOfTracks() == RaceManager::get()->getTrackNumber() + 1
            && !RaceManager::get()->getGrandPrix().isRandomGP() && RaceManager::get()->getSkippedTracksInGP() == 0)
         {
             Highscores* highscores = World::getWorld()->getGPHighscores();
-            const AbstractKart* k = RaceManager::get()->getKartWithGPRank(RaceManager::get()->getLocalPlayerGPRank(PLAYER_ID_GAME_MASTER));
-            float full_time = RaceManager::get()->getOverallTime(RaceManager::get()->getLocalPlayerGPRank(PLAYER_ID_GAME_MASTER));
+            float full_time;
+            if (RaceManager::get()->isLapTrialMode())
+                full_time = static_cast<float>(RaceManager::get()->getGPTotalLaps());
+            else
+                full_time = RaceManager::get()->getOverallTime(RaceManager::get()->getLocalPlayerGPRank(PLAYER_ID_GAME_MASTER));
             std::string gp_name = RaceManager::get()->getGrandPrix().getId();
             highscores->addGPData(k->getIdent(), k->getController()->getName(), gp_name, full_time);
         }
@@ -522,7 +528,9 @@ void RaceResultGUI::eventCallback(GUIEngine::Widget* widget,
             else if (action == "right")        // Abort
             {
                 new MessageDialog(_("Do you really want to abort the Grand Prix?"),
-                    MessageDialog::MESSAGE_DIALOG_CONFIRM, this, false);
+                    MessageDialog::MESSAGE_DIALOG_CONFIRM, this,
+                    /*delete_listener*/false, /*from_queue*/false,
+                    /*width*/0.6f, /*height*/0.6f, /*focus_on_cancel*/true);
             }
             else if (!getWidget(action.c_str())->isVisible())
             {
@@ -849,6 +857,7 @@ void RaceResultGUI::unload()
                 continue;
             // Save a pointer to the current row_info entry
             RowInfo *ri = &(m_all_row_infos[position - first_position]);
+            ri->m_kart_id = kart->getWorldKartId();
             ri->m_is_player_kart = kart->getController()->isLocalPlayerController();
             ri->m_kart_name = kart->getController()->getName();
             if (RaceManager::get()->getKartGlobalPlayerId(kart->getWorldKartId()) > -1)
@@ -909,6 +918,7 @@ void RaceResultGUI::unload()
                         ri->m_finish_time_string += StringUtils::toWString(ranking_change);
                 }
             }
+            ri->m_laps = World::getWorld()->getFinishedLapsOfKart(ri->m_kart_id);
 
             core::dimension2du rect =
                 m_font->getDimension(ri->m_kart_name.c_str());
@@ -1366,6 +1376,8 @@ void RaceResultGUI::unload()
             ri->m_centre_point = m_top + (gp_position + j)*m_distance_between_rows*0.5f;
             int p = RaceManager::get()->getKartScore(i);
             ri->m_new_overall_points = p;
+            ri->m_new_gp_rank = gp_position;
+            ri->m_laps = World::getWorld()->getFinishedLapsOfKart(i);
         }   // i < num_karts
 #endif
     }   // determineGPLayout
@@ -1385,13 +1397,23 @@ void RaceResultGUI::unload()
             : video::SColor(255, 255, 255, 255);
 
         unsigned int current_x = x;
+
+        // Draw rank order
+        // (only when num. of karts >=10 )
         if (RaceManager::get()->getMinorMode() != RaceManager::MINOR_MODE_FREE_FOR_ALL &&
             !ri->m_finish_time_string.empty() &&
             RaceManager::get()->getNumberOfKarts() >= 10)
         {
-            int pos_rank_width = m_font->getDimension(core::stringw(n + 1).c_str()).Width;
+            int rankNo = (
+                RaceManager::get()->getMajorMode()==RaceManager::MAJOR_MODE_GRAND_PRIX &&
+                m_animation_state >= RR_RESORT_TABLE
+                    ? ri->m_new_gp_rank
+                    : n
+            ) + 1;
+
+            int pos_rank_width = m_font->getDimension(core::stringw(rankNo).c_str()).Width;
             core::recti pos_rank(current_x, y, pos_rank_width, m_distance_between_rows);
-            m_font->draw(core::stringw(n + 1), pos_rank, color);
+            m_font->draw(core::stringw(rankNo), pos_rank, color);
             current_x += 48;
         }
 
@@ -1434,11 +1456,22 @@ void RaceResultGUI::unload()
             true /* ignoreRTL */);
         current_x += m_width_kart_name + m_width_column_space;
 
+        if (RaceManager::get()->isLapTrialMode())
+        {
+            core::recti pos_laps = core::recti(current_x, y, current_x + 100, y + 10);
+            m_font->draw(irr::core::stringw(ri->m_laps), pos_laps, color, false, false,
+                NULL, true /* ignoreRTL */);
+        }
+        else
+        {
+            core::recti dest_rect = core::recti(current_x, y, current_x + 100, y + 10);
+            m_font->draw(ri->m_finish_time_string, dest_rect, color, false, false,
+                NULL, true /* ignoreRTL */);
+            current_x += m_width_finish_time + m_width_column_space;
+        }
+        
 
-        core::recti dest_rect = core::recti(current_x, y, current_x + 100, y + 10);
-        m_font->draw(ri->m_finish_time_string, dest_rect, color, false, false,
-            NULL, true /* ignoreRTL */);
-        current_x += m_width_finish_time + m_width_column_space;
+        current_x += 100 + m_width_column_space;
 
         // Only display points in GP mode and when the GP results are displayed.
         // =====================================================================
@@ -1914,8 +1947,12 @@ void RaceResultGUI::unload()
                 current_x = (int)(UserConfigParams::m_width * 0.85f);
 
                 // Finally draw the time
-                std::string time_string = StringUtils::timeToString(time, time_precision);
-                GUIEngine::getSmallFont()->draw(time_string.c_str(),
+                std::string highscore_string;
+                if (RaceManager::get()->isLapTrialMode())
+                    highscore_string = std::to_string(static_cast<int>(time));
+                else
+                    highscore_string = StringUtils::timeToString(time, time_precision);
+                GUIEngine::getSmallFont()->draw(highscore_string.c_str(),
                     core::recti(current_x, current_y, current_x + 100, current_y + 10),
                     text_color,
                     false, false, NULL, true /* ignoreRTL */);
@@ -1935,8 +1972,50 @@ void RaceResultGUI::unload()
                     white_color, false, false, nullptr, true);
             }
             // display difficulty
-            const core::stringw& difficulty_name =
+            core::stringw difficulty_name =
                 RaceManager::get()->getDifficultyName(RaceManager::get()->getDifficulty());
+            core::stringw difficulty_one;
+            core::stringw difficulty_two;
+            core::recti diff_ghost_one, diff_ghost_two;
+            if (RaceManager::get()->hasGhostKarts() && ReplayPlay::get()->isSecondReplayEnabled())
+            {
+                WorldWithRank* wwr = dynamic_cast<WorldWithRank*>(World::getWorld());
+                for (unsigned k = 0; k < wwr->getNumKarts(); k++)
+                {
+                    GhostKart* gk = dynamic_cast<GhostKart*>(wwr->getKartAtPosition(k + 1));
+                    if (!gk)
+                        continue;
+                    const ReplayPlay::ReplayData& rd = gk->getReplayData();
+                    if (difficulty_one.empty())
+                    {
+                        difficulty_one = RaceManager::get()->getDifficultyName((RaceManager::Difficulty)rd.m_difficulty);
+                        core::dimension2d<u32> dim_1 = m_font->getDimension(difficulty_one.c_str());
+                        RowInfo* ri_1 = &(m_all_row_infos[k]);
+                        diff_ghost_one.UpperLeftCorner.X = ri_1->m_x_pos + m_width_icon + m_width_kart_name + m_width_finish_time + m_width_column_space + 20;
+                        diff_ghost_one.UpperLeftCorner.Y = ri_1->m_y_pos;
+                        diff_ghost_one.LowerRightCorner.X = diff_ghost_one.UpperLeftCorner.X + dim_1.Width;
+                        diff_ghost_one.LowerRightCorner.Y = diff_ghost_one.UpperLeftCorner.Y + dim_1.Height;
+                    }
+                    else if (difficulty_two.empty())
+                    {
+                        difficulty_two = RaceManager::get()->getDifficultyName((RaceManager::Difficulty)rd.m_difficulty);
+                        core::dimension2d<u32> dim_2 = m_font->getDimension(difficulty_two.c_str());
+                        RowInfo* ri_2 = &(m_all_row_infos[k]);
+                        diff_ghost_two.UpperLeftCorner.X = ri_2->m_x_pos + m_width_icon + m_width_kart_name + m_width_finish_time + m_width_column_space + 20;
+                        diff_ghost_two.UpperLeftCorner.Y = ri_2->m_y_pos;
+                        diff_ghost_two.LowerRightCorner.X = diff_ghost_two.UpperLeftCorner.X + dim_2.Width;
+                        diff_ghost_two.LowerRightCorner.Y = diff_ghost_two.UpperLeftCorner.Y + dim_2.Height;
+                    }
+                }
+                if (difficulty_one != difficulty_two)
+                    difficulty_name = difficulty_one + L" / " + difficulty_two;
+                else
+                    difficulty_name = difficulty_one;
+
+                // Left side difficulty display
+                m_font->draw(difficulty_one, diff_ghost_one, video::SColor(255, 255, 255, 255), false, false, nullptr, true);
+                m_font->draw(difficulty_two, diff_ghost_two, video::SColor(255, 255, 255, 255), false, false, nullptr, true);
+            }
             core::stringw difficulty_string = _("Difficulty: %s", difficulty_name);
             current_y += int(m_distance_between_meta_rows * 0.8f);
             GUIEngine::getFont()->draw(difficulty_string,

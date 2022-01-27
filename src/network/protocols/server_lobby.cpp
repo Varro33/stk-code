@@ -1451,6 +1451,7 @@ void ServerLobby::asynchronousUpdate()
         if (NetworkConfig::get()->isLAN())
         {
             m_state = WAITING_FOR_START_GAME;
+            updatePlayerList();
             STKHost::get()->startListening();
             return;
         }
@@ -1482,6 +1483,7 @@ void ServerLobby::asynchronousUpdate()
         if (m_game_setup->isGrandPrixStarted() || m_registered_for_once_only)
         {
             m_state = WAITING_FOR_START_GAME;
+            updatePlayerList();
             break;
         }
         // Register this server with the STK server. This will block
@@ -1500,6 +1502,7 @@ void ServerLobby::asynchronousUpdate()
                 if (allowJoinedPlayersWaiting())
                     m_registered_for_once_only = true;
                 m_state = WAITING_FOR_START_GAME;
+                updatePlayerList();
             }
         }
         break;
@@ -1827,6 +1830,7 @@ void ServerLobby::liveJoinRequest(Event* event)
     peer->clearAvailableKartIDs();
     if (!spectator)
     {
+        auto spectators_by_limit = getSpectatorsByLimit();
         setPlayerKarts(data, peer);
 
         std::vector<int> used_id;
@@ -1837,7 +1841,8 @@ void ServerLobby::liveJoinRequest(Event* event)
                 break;
             used_id.push_back(id);
         }
-        if (used_id.size() != peer->getPlayerProfiles().size())
+        if ((used_id.size() != peer->getPlayerProfiles().size()) ||
+            (spectators_by_limit.find(event->getPeerSP()) != spectators_by_limit.end()))
         {
             for (unsigned i = 0; i < peer->getPlayerProfiles().size(); i++)
                 peer->getPlayerProfiles()[i]->setKartName("");
@@ -2526,35 +2531,19 @@ void ServerLobby::startSelection(const Event *event)
     unsigned max_player = 0;
     STKHost::get()->updatePlayers(&max_player);
 
-    if (max_player > 10 && (RaceManager::get()->isBattleMode() ||
-        RaceManager::get()->isSoccerMode()))
+    // Set late coming player to spectate if too many players
+    auto spectators_by_limit = getSpectatorsByLimit();
+    if (spectators_by_limit.size() == peers.size())
     {
-        // Set late coming player to spectate if too many players in battle or
-        // soccer
-        std::sort(peers.begin(), peers.end(),
-            [](const std::shared_ptr<STKPeer>& a,
-            const std::shared_ptr<STKPeer>& b)
-            { return a->getHostId() > b->getHostId(); });
-        int remove_player = max_player - 10;
-        for (unsigned i = 0; i < peers.size(); i++)
-        {
-            auto& peer = peers[i];
-            if (!peer->isValidated() || peer->isWaitingForGame())
-                continue;
-            peer->setAlwaysSpectate(ASM_FULL);
-            peer->setWaitingForGame(true);
-            always_spectate_peers.insert(peer.get());
-            remove_player -= (int)peer->getPlayerProfiles().size();
-            if (remove_player <= 0)
-                break;
-            // In case something goes wrong (all players need spectate)
-            if (i == peers.size() - 1)
-            {
-                Log::error("ServerLobby", "Too many players and cannot set "
-                    "spectate for late coming players!");
-                return;
-            }
-        }
+        Log::error("ServerLobby", "Too many players and cannot set "
+            "spectate for late coming players!");
+        return;
+    }
+    for(auto &peer : spectators_by_limit)
+    {
+        peer->setAlwaysSpectate(ASM_FULL);
+        peer->setWaitingForGame(true);
+        always_spectate_peers.insert(peer.get());
     }
 
     for (const std::string& kart_erase : karts_erase)
@@ -3976,6 +3965,9 @@ void ServerLobby::updatePlayerList(bool update_when_reset_server)
         if (profile->getPeer()->alwaysSpectate())
             all_profiles_size--;
     }
+
+    auto spectators_by_limit = getSpectatorsByLimit();
+
     // N - 1 AI
     auto ai_instance = m_ai_peer.lock();
     if (supportsAI())
@@ -4022,22 +4014,23 @@ void ServerLobby::updatePlayerList(bool update_when_reset_server)
         .addUInt8((uint8_t)all_profiles.size());
     for (auto profile : all_profiles)
     {
+        auto profile_name = profile->getName();
+
         // get OS information
         auto version_os = StringUtils::extractVersionOS(profile->getPeer()->getUserVersion());
         std::string os_type_str = version_os.second;
         // if mobile OS
         if (os_type_str == "iOS" || os_type_str == "Android")
-        { // Add a Mobile emoji for mobile OS
-            pl->addUInt32(profile->getHostId()).addUInt32(profile->getOnlineId())
-                .addUInt8(profile->getLocalPlayerId())
-                .encodeString(StringUtils::utf32ToWide({0x1F4F1}) + profile->getName());
-        }
-        else
-        {
-            pl->addUInt32(profile->getHostId()).addUInt32(profile->getOnlineId())
-                .addUInt8(profile->getLocalPlayerId())
-                .encodeString(profile->getName());
-        }
+            // Add a Mobile emoji for mobile OS
+            profile_name = StringUtils::utf32ToWide({ 0x1F4F1 }) + profile_name;
+
+        // Add an hourglass emoji for players waiting because of the player limit
+        if (spectators_by_limit.find(profile->getPeer()) != spectators_by_limit.end()) 
+            profile_name = StringUtils::utf32ToWide({ 0x231B }) + profile_name;
+
+        pl->addUInt32(profile->getHostId()).addUInt32(profile->getOnlineId())
+            .addUInt8(profile->getLocalPlayerId())
+            .encodeString(profile_name);
 
         std::shared_ptr<STKPeer> p = profile->getPeer();
         uint8_t boolean_combine = 0;
@@ -4785,6 +4778,7 @@ void ServerLobby::resetServer()
     setup();
     m_state = NetworkConfig::get()->isLAN() ?
         WAITING_FOR_START_GAME : REGISTER_SELF_ADDRESS;
+    updatePlayerList();
 }   // resetServer
 
 //-----------------------------------------------------------------------------
@@ -5511,6 +5505,61 @@ void ServerLobby::clientSelectingAssetsWantsToBackLobby(Event* event)
     peer->sendPacket(server_info, /*reliable*/true);
     delete server_info;
 }   // clientSelectingAssetsWantsToBackLobby
+
+std::set<std::shared_ptr<STKPeer>> ServerLobby::getSpectatorsByLimit()
+{
+    std::set<std::shared_ptr<STKPeer>> spectators_by_limit;
+
+    auto peers = STKHost::get()->getPeers();
+    std::set<std::shared_ptr<STKPeer>> always_spectate_peers;
+
+    unsigned player_limit = ServerConfig::m_max_players_in_game;
+    // only 10 players allowed for battle or soccer
+    if (RaceManager::get()->isBattleMode() || RaceManager::get()->isSoccerMode())
+        player_limit = std::min(player_limit, 10u);
+
+    unsigned ingame_players = 0, waiting_players = 0, total_players = 0;
+    STKHost::get()->updatePlayers(&ingame_players, &waiting_players, &total_players);
+    if (total_players <= player_limit)
+        return spectators_by_limit;
+
+    std::sort(peers.begin(), peers.end(),
+        [](const std::shared_ptr<STKPeer>& a,
+            const std::shared_ptr<STKPeer>& b)
+        { return a->getHostId() < b->getHostId(); });
+
+    if (m_state.load() >= RACING)
+    {
+        for (auto &peer : peers)
+            if (peer->isSpectator())
+                ingame_players -= (int)peer->getPlayerProfiles().size();
+    }
+
+    unsigned player_count = 0;
+    for (unsigned i = 0; i < peers.size(); i++)
+    {
+        auto& peer = peers[i];
+        if (!peer->isValidated())
+            continue;
+        if (m_state.load() < RACING)
+        {
+            if (peer->alwaysSpectate() || peer->isWaitingForGame())
+                continue;
+            player_count += (unsigned)peer->getPlayerProfiles().size();
+            if (player_count > player_limit)
+                spectators_by_limit.insert(peer);
+        }
+        else
+        {
+            if (peer->isSpectator())
+                continue;
+            player_count += (unsigned)peer->getPlayerProfiles().size();
+            if (peer->isWaitingForGame() && (player_count > player_limit || ingame_players >= player_limit))
+                spectators_by_limit.insert(peer);
+        }
+    }
+    return spectators_by_limit;
+}
 
 //-----------------------------------------------------------------------------
 void ServerLobby::saveInitialItems(std::shared_ptr<NetworkItemManager> nim)

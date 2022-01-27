@@ -32,11 +32,13 @@
 #include "LinearMath/btQuaternion.h"
 
 GhostKart::GhostKart(const std::string& ident, unsigned int world_kart_id,
-                     int position, float color_hue)
+                     int position, float color_hue,
+                     const ReplayPlay::ReplayData& rd)
           : Kart(ident, world_kart_id,
                  position, btTransform(btQuaternion(0, 0, 0, 1)),
                  HANDICAP_NONE,
-                 std::make_shared<RenderInfo>(color_hue, true/*transparent*/))
+                 std::make_shared<RenderInfo>(color_hue, true/*transparent*/)),
+                 m_replay_data(rd)
 {
 }   // GhostKart
 
@@ -130,12 +132,19 @@ void GhostKart::update(int ticks)
     const float rd         = gc->getReplayDelta();
     assert(idx < m_all_transform.size());
 
-    setXYZ((1- rd)*m_all_transform[idx    ].getOrigin()
-           +  rd  *m_all_transform[idx + 1].getOrigin() );
-
-    const btQuaternion q = m_all_transform[idx].getRotation()
-        .slerp(m_all_transform[idx + 1].getRotation(), rd);
-    setRotation(q);
+    if (idx >= m_all_transform.size() - 1)
+    {
+        setXYZ(m_all_transform.back().getOrigin());
+        setRotation(m_all_transform.back().getRotation());
+    }
+    else
+    {
+        setXYZ((1- rd)*m_all_transform[idx    ].getOrigin()
+               +  rd  *m_all_transform[idx + 1].getOrigin() );
+        const btQuaternion q = m_all_transform[idx].getRotation()
+            .slerp(m_all_transform[idx + 1].getRotation(), rd);
+        setRotation(q);
+    }
 
     Moveable::updatePosition();
     float dt = stk_config->ticks2Time(ticks);
@@ -235,8 +244,8 @@ float GhostKart::getSpeed() const
 
     assert(gc->getCurrentReplayIndex() < m_all_physic_info.size());
 
-    if (current_index == m_all_physic_info.size())
-        return m_all_physic_info[current_index].m_speed;
+    if (current_index >= m_all_physic_info.size() - 1)
+        return m_all_physic_info.back().m_speed;
 
     return (1-rd)*m_all_physic_info[current_index    ].m_speed
            +  rd *m_all_physic_info[current_index + 1].m_speed;

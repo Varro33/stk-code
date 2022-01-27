@@ -76,6 +76,8 @@ private:
     class RowInfo
     {
     public:
+        /** Kart ID in World */
+        unsigned int     m_kart_id;
         /** Start time for each line of the animation. */
         float            m_start_at;
         /** Currenct X position. */
@@ -95,6 +97,8 @@ private:
         float            m_new_points;
         /** New overall points after this race. */
         int              m_new_overall_points;
+        /** New GP rank after this race. */
+        int              m_new_gp_rank;
         /** When updating the number of points in the display, this is the
             currently displayed number of points. This is a floating point number
             since it stores the increments during increasing the points. */
@@ -105,6 +109,8 @@ private:
         core::stringw    m_finish_time_string;
         /** The kart color */
         float            m_kart_color;
+        /** Number of laps that kart finished */
+        unsigned int     m_laps;
     };   // Rowinfo
 
     /** The team icons. */
